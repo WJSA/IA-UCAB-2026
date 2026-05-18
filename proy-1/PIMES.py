@@ -10,6 +10,8 @@ from sklearn.model_selection import cross_val_predict
 from sklearn.metrics import roc_curve, auc
 from sklearn.neural_network import MLPClassifier
 
+# agregar requirements.txt, sino pip install numpy pandas scikit-learn matplotlib joblib
+
 MODEL_FILE = "pimes_model.pkl"
 
 
