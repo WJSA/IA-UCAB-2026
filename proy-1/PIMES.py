@@ -1,136 +1,134 @@
-import argparse
 import sys
-from typing import Tuple
-
-import joblib
+import pickle
 import matplotlib.pyplot as plt
-import numpy as np
 import pandas as pd
 from sklearn.model_selection import cross_val_predict
 from sklearn.metrics import roc_curve, auc
 from sklearn.neural_network import MLPClassifier
 
-# agregar requirements.txt, sino pip install numpy pandas scikit-learn matplotlib joblib
-
+# archivo para guardar el modelo
 MODEL_FILE = "pimes_model.pkl"
 
+class PIMES:
+    def __init__(self):
+        # inicializar modelo de red neuronal superficial
+        self.modelo = MLPClassifier(
+            hidden_layer_sizes=(100,), 
+            max_iter=1000, 
+            early_stopping=True, 
+            random_state=42
+        )
 
-def load_and_align_data(features_path: str, labels_path: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """Carga los conjuntos de datos de características y etiquetas, garantizando una alineación estricta de los índices."""
-    try:
-        X = pd.read_csv(features_path, sep="\t", index_col=0)
-        Y = pd.read_csv(labels_path, sep="\t", index_col=0)
-        
-        common_indices = X.index.intersection(Y.index)
-        if common_indices.empty:
-            raise ValueError("No se encontraron medicamentos comunes entre ambos conjuntos de datos.")
+    def cargar_datos(self, archivo_med, archivo_efectos):
+        # leer los datos tabulares
+        try:
+            X = pd.read_csv(archivo_med, sep="\t", index_col=0)
+            Y = pd.read_csv(archivo_efectos, sep="\t", index_col=0)
             
-        return X.loc[common_indices], Y.loc[common_indices]
-    except Exception as e:
-        sys.exit(f"Error al cargar los datos: {str(e)}")
+            # verificar indices comunes
+            comunes = X.index.intersection(Y.index)
+            if comunes.empty:
+                print("Error: No se encontraron medicamentos comunes.")
+                sys.exit(1)
+                
+            return X.loc[comunes], Y.loc[comunes]
+        except Exception as e:
+            print(f"Error cargando datos: {str(e)}")
+            sys.exit(1)
+
+    def entrenar(self, archivo_med, archivo_efectos):
+        X, Y = self.cargar_datos(archivo_med, archivo_efectos)
+        
+        # validacion cruzada (5 folds)
+        predicciones = cross_val_predict(self.modelo, X, Y, cv=5, method="predict_proba")
+        
+        # calculo de ROC y AUC global (micro-average para multietiqueta)
+        y_true = Y.values.ravel()
+        y_prob = predicciones.ravel()
+        fpr, tpr, _ = roc_curve(y_true, y_prob)
+        roc_auc = auc(fpr, tpr)
+        
+        print(f"AUC: {roc_auc:.4f}")
+        
+        # mostrar grafica
+        plt.figure(figsize=(7, 5))
+        plt.plot(fpr, tpr, color="darkorange", lw=2, label=f"ROC (AUC = {roc_auc:.4f})")
+        plt.plot([0, 1], [0, 1], color="navy", lw=2, linestyle="--")
+        plt.xlim([0.0, 1.0])
+        plt.ylim([0.0, 1.05])
+        plt.xlabel("Falsos Positivos (FPR)")
+        plt.ylabel("Verdaderos Positivos (TPR)")
+        plt.title("Curva ROC - PIMES")
+        plt.legend(loc="lower right")
+        plt.grid(True, alpha=0.3)
+        plt.show()
+        
+        # entrenar con todos los datos y guardar
+        self.modelo.fit(X, Y)
+        datos_guardar = {
+            "modelo": self.modelo,
+            "features": X.columns.tolist(),
+            "labels": Y.columns.tolist()
+        }
+        with open(MODEL_FILE, "wb") as f:
+            pickle.dump(datos_guardar, f)
+
+    def predecir(self, archivo_med, archivo_efectos):
+        try:
+            with open(MODEL_FILE, "rb") as f:
+                datos_guardados = pickle.load(f)
+            self.modelo = datos_guardados["modelo"]
+            etiquetas_entrenadas = datos_guardados["labels"]
+            caracteristicas_entrenadas = datos_guardados["features"]
+        except FileNotFoundError:
+            print(f"Error: Modelo '{MODEL_FILE}' no encontrado. Entrena primero con -e.")
+            sys.exit(1)
+
+        # cargar nuevos datos
+        X_test = pd.read_csv(archivo_med, sep="\t", index_col=0)
+        X_test = X_test.reindex(columns=caracteristicas_entrenadas, fill_value=0)
+        
+        # leer efectos a predecir
+        with open(archivo_efectos, "r", encoding="utf-8") as f:
+            efectos_solicitados = [linea.strip() for linea in f if linea.strip()]
+
+        # predecir probabilidades
+        matriz_proba = self.modelo.predict_proba(X_test)
+        df_predicciones = pd.DataFrame(matriz_proba, index=X_test.index, columns=etiquetas_entrenadas)
+        
+        efectos_validos = [ef for ef in efectos_solicitados if ef in etiquetas_entrenadas]
+        if not efectos_validos:
+            print("Error: Ningun efecto solicitado coincide con los del modelo.")
+            sys.exit(1)
+
+        # mostrar resultados ordenados
+        for med in df_predicciones.index:
+            print(f"Drug: {med}")
+            efectos_ordenados = df_predicciones.loc[med, efectos_validos].sort_values(ascending=False)
+            for efecto, prob in efectos_ordenados.items():
+                print(f"  {efecto}: {prob:.6f}")
+            print()
 
 
-def compute_multilabel_roc(Y_true: np.ndarray, Y_proba: np.ndarray) -> Tuple[np.ndarray, np.ndarray, float]:
-    """Aclana las matrices multietiqueta para calcular la curva ROC y el AUC global (Micro-average)."""
-    fpr, tpr, _ = roc_curve(Y_true.ravel(), Y_proba.ravel())
-    macro_auc = auc(fpr, tpr)
-    return fpr, tpr, macro_auc
-
-
-def plot_roc_curve(fpr: np.ndarray, tpr: np.ndarray, roc_auc: float) -> None:
-    """Genera y despliega en pantalla la gráfica de la curva ROC."""
-    plt.figure(figsize=(7, 5))
-    plt.plot(fpr, tpr, color="darkorange", lw=2, label=f"Curva ROC (AUC = {roc_auc:.4f})")
-    plt.plot([0, 1], [0, 1], color="navy", lw=2, linestyle="--")
-    plt.xlim([0.0, 1.0])
-    plt.ylim([0.0, 1.05])
-    plt.xlabel("Tasa de Falsos Positivos (FPR)")
-    plt.ylabel("Tasa de Verdaderos Positivos (TPR)")
-    plt.title("Receiver Operating Characteristic (ROC) - PIMES")
-    plt.legend(loc="lower right")
-    plt.grid(True, alpha=0.3)
-    plt.tight_layout()
-    plt.show()
-
-
-def run_training_mode(features_path: str, labels_path: str) -> None:
-    """Gestiona la validación cruzada, visualización de métricas y la serialización final del modelo."""
-    X, Y = load_and_align_data(features_path, labels_path)
+def main():
+    # uso: python3 PIMES.py -[e|p] medicamentos.txt efectos.txt
+    if len(sys.argv) != 4:
+        print("Uso: python3 PIMES.py -[e|p] <archivo-medicamentos> <archivo-efectosSecundarios>")
+        sys.exit(1)
+        
+    modo = sys.argv[1]
+    archivo_med = sys.argv[2]
+    archivo_efectos = sys.argv[3]
     
-    # Arquitectura Perceptrón Multicapa (MLP) poco profunda con parada temprana
-    model = MLPClassifier(
-        hidden_layer_sizes=(100,), 
-        max_iter=1000, 
-        early_stopping=True, 
-        random_state=42
-    )
+    sistema = PIMES()
     
-    # Validación cruzada de 5 pliegues que retorna la matriz bidimensional de probabilidades
-    predictions_proba = cross_val_predict(model, X, Y, cv=5, method="predict_proba")
-    
-    fpr, tpr, roc_auc = compute_multilabel_roc(Y.values, predictions_proba)
-    print(f"AUC: {roc_auc:.4f}")
-    
-    plot_roc_curve(fpr, tpr, roc_auc)
-    
-    # Entrenamiento final con el 100% de los datos antes de exportar
-    model.fit(X, Y)
-    
-    payload = {
-        "model": model,
-        "features_names": X.columns.tolist(),
-        "labels_names": Y.columns.tolist()
-    }
-    joblib.dump(payload, MODEL_FILE)
-
-
-def run_prediction_mode(test_features_path: str, target_effects_path: str) -> None:
-    """Predice las probabilidades de efectos secundarios para nuevos fármacos y muestra los resultados ordenados."""
-    try:
-        payload = joblib.load(MODEL_FILE)
-        model = payload["model"]
-        trained_labels = payload["labels_names"]
-        trained_features = payload["features_names"]
-    except FileNotFoundError:
-        sys.exit(f"Archivo de modelo '{MODEL_FILE}' no encontrado. Ejecute primero el entrenamiento (-e).")
-
-    X_test = pd.read_csv(test_features_path, sep="\t", index_col=0)
-    X_test = X_test.reindex(columns=trained_features, fill_value=0)
-    
-    with open(target_effects_path, "r", encoding="utf-8") as file:
-        requested_effects = [line.strip() for line in file if line.strip()]
-
-    # Predicción directa de probabilidades en formato matricial
-    proba_matrix = model.predict_proba(X_test)
-    predictions_df = pd.DataFrame(proba_matrix, index=X_test.index, columns=trained_labels)
-    
-    valid_effects = [effect for effect in requested_effects if effect in trained_labels]
-    if not valid_effects:
-        sys.exit("Ninguno de los efectos solicitados coincide con los objetivos del modelo entrenado.")
-
-    # Filtrado y formateo de la salida ordenada de forma descendente por probabilidad
-    for drug in predictions_df.index:
-        print(f"Drug: {drug}")
-        sorted_effects = predictions_df.loc[drug, valid_effects].sort_values(ascending=False)
-        for effect, probability in sorted_effects.items():
-            print(f"  {effect}: {probability:.6f}")
-        print()
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(description="PIMES: Predictor de Efectos Secundarios mediante Redes Neuronales")
-    mode_group = parser.add_mutually_exclusive_group(required=True)
-    
-    mode_group.add_argument("-e", nargs=2, metavar=("MEDICAMENTS_FILE", "EFFECTS_FILE"))
-    mode_group.add_argument("-p", nargs=2, metavar=("TEST_MEDS_FILE", "TARGET_EFFECTS_FILE"))
-    
-    args = parser.parse_args()
-    
-    if args.e:
-        run_training_mode(args.e[0], args.e[1])
-    elif args.p:
-        run_prediction_mode(args.p[0], args.p[1])
-
+    if modo == "-e":
+        sistema.entrenar(archivo_med, archivo_efectos)
+    elif modo == "-p":
+        sistema.predecir(archivo_med, archivo_efectos)
+    else:
+        print("Modo invalido. Usa -e para entrenamiento o -p para prediccion.")
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
