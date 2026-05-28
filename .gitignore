@@ -12,3 +12,6 @@ venv/
 .vscode/
 *.swp
 .DS_Store
+
+# Salidas grandes del proyecto (no versionar)
+proy-1/resultados_prediccion.txt
